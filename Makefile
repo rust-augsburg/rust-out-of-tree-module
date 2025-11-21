@@ -20,3 +20,6 @@ modules_install: default
 # Create rust-analyzer config
 rust-analyzer:
 	make -C $(KDIR) M=$$PWD rust-analyzer
+
+make clean-logs:
+	rm rust_out_of_tree*.txt
