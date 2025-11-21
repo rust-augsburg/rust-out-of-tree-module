@@ -1,37 +1,171 @@
-// SPDX-License-Identifier: GPL-2.0
+//! A misc device that represents an in-memory file.
 
-//! Rust out-of-tree sample
+use core::pin::Pin;
 
-use kernel::prelude::*;
+use kernel::{
+    bindings, c_str, device,
+    fs::{File, Kiocb},
+    iov::{IovIterDest, IovIterSource},
+    miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
+    new_mutex,
+    prelude::*,
+    sync::{aref::ARef, Arc, Mutex},
+};
+
+// Helper functions
+
+/// Set data for a device.
+///
+/// SAFETY: Must only be called once (i.e. there was no previous data).
+unsafe fn dev_set_drv_data<T>(dev: &device::Device, data: &Arc<T>) {
+    unsafe {
+        let ptr = core::ptr::from_ref(dev).cast::<bindings::device>() as *mut _;
+        bindings::dev_set_drvdata(ptr, core::ptr::from_ref(data) as *mut _);
+    }
+}
+
+/// Get data of a device.
+///
+/// SAFETY: Must have the same generic type as [`dev_set_drv_data`].
+unsafe fn dev_get_drv_data<T>(dev: &device::Device) -> Arc<T> {
+    unsafe {
+        let ptr = core::ptr::from_ref(dev).cast::<bindings::device>() as *mut _;
+        let data = bindings::dev_get_drvdata(ptr) as *mut Arc<T>;
+        Arc::clone(&*data)
+    }
+}
+
+// Module code
 
 module! {
-    type: RustOutOfTree,
-    name: "rust_out_of_tree",
-    authors: ["Rust for Linux Contributors"],
-    description: "Rust out-of-tree sample",
+    type: RustMiscDeviceModule,
+    name: "rust_misc_device",
+    authors: ["Lee Jones", "Aaron Erhardt"],
+    description: "Rust misc device sample",
     license: "GPL",
 }
 
-struct RustOutOfTree {
-    numbers: KVec<i32>,
+#[pin_data]
+struct RustMiscDeviceModule {
+    #[pin]
+    miscdev: MiscDeviceRegistration<RustMiscDevice>,
+    #[pin]
+    global: Arc<GlobalData>,
 }
 
-impl kernel::Module for RustOutOfTree {
-    fn init(_module: &'static ThisModule) -> Result<Self> {
-        pr_info!("Rust out-of-tree sample (init)\n");
+/// The data structure we will store "globally" for the device
+/// to keep the buffer in memory accross open and close.
+#[pin_data]
+struct GlobalData {
+    #[pin]
+    data: Mutex<KVVec<u8>>,
+}
 
-        let mut numbers = KVec::new();
-        numbers.push(72, GFP_KERNEL)?;
-        numbers.push(108, GFP_KERNEL)?;
-        numbers.push(200, GFP_KERNEL)?;
+impl kernel::InPlaceModule for RustMiscDeviceModule {
+    fn init(_module: &'static ThisModule) -> impl PinInit<Self, Error> {
+        pr_info!("Initialising Rust Misc Device Sample\n");
 
-        Ok(RustOutOfTree { numbers })
+        // Create options
+        let options = MiscDeviceOptions {
+            name: c_str!("rust-misc-device"),
+            mode: 0o766,
+        };
+
+        let global = Arc::try_pin_init(
+            try_pin_init! {
+                GlobalData {
+                    data <- new_mutex!(KVVec::new())
+                }
+            },
+            GFP_KERNEL,
+        )
+        .unwrap();
+
+        let init = try_pin_init!(Self {
+            miscdev <- MiscDeviceRegistration::register(options),
+            global,
+        });
+
+        // Run post-initialization
+        init.pin_chain(|v| v.post_init())
     }
 }
 
-impl Drop for RustOutOfTree {
-    fn drop(&mut self) {
-        pr_info!("My numbers are {:?}\n", self.numbers);
-        pr_info!("Rust out-of-tree sample (exit)\n");
+impl RustMiscDeviceModule {
+    /// Initializes driver data.
+    fn post_init(self: Pin<&mut Self>) -> Result<()> {
+        // TODO: How to set driver data safely?
+        Ok(())
     }
 }
+
+// Misc-device implementation
+
+#[pin_data(PinnedDrop)]
+struct RustMiscDevice {
+    #[pin]
+    global: Arc<GlobalData>,
+    dev: ARef<device::Device>,
+}
+
+#[vtable]
+impl MiscDevice for RustMiscDevice {
+    type Ptr = Pin<KBox<Self>>;
+
+    fn open(_file: &File, misc: &MiscDeviceRegistration<Self>) -> Result<Pin<KBox<Self>>> {
+        let dev = ARef::from(misc.device());
+
+        dev_info!(dev, "Opening Rust Misc Device Sample\n");
+
+        // Load the global driver data here
+        // TODO: How to load driver data safely?
+
+        KBox::try_pin_init(
+            try_pin_init! {
+                RustMiscDevice {
+                    global,
+                    dev,
+                }
+            },
+            GFP_KERNEL,
+        )
+    }
+
+    // Read the global buffer.
+    fn read_iter(mut kiocb: Kiocb<'_, Self::Ptr>, iov: &mut IovIterDest<'_>) -> Result<usize> {
+        let me = kiocb.file();
+        dev_info!(me.dev, "Reading from Rust Misc Device Sample\n");
+
+        // TODO: lock?
+
+        // TODO: Read the buffer contents, taking the file position into account.
+
+        Ok(read)
+    }
+
+    // Allow writing to the global buffer.
+    fn write_iter(mut kiocb: Kiocb<'_, Self::Ptr>, iov: &mut IovIterSource<'_>) -> Result<usize> {
+        let me = kiocb.file();
+        dev_info!(me.dev, "Writing to Rust Misc Device Sample\n");
+
+        // TODO: lock?
+
+        // TODO: Replace buffer contents.
+
+        // TODO: Set position to zero so that future `read` calls will see the new contents.
+
+        Ok(len)
+    }
+}
+
+// Print some information when device is dropped.
+#[pinned_drop]
+impl PinnedDrop for RustMiscDevice {
+    fn drop(self: Pin<&mut Self>) {
+        dev_info!(self.dev, "Exiting the Rust Misc Device Sample\n");
+    }
+}
+
+// HINT: Useful methods:
+// - iov.simple_read_from_buffer
+// - iov.copy_from_iter_vec
